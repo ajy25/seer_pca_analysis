@@ -1,0 +1,7 @@
+overall-survival/data/*
+pca-survival/data/*
+output/*
+__pycache__/
+tmp
+.DS_Store
+.DS_Store
