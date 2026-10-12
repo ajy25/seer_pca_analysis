@@ -1,4 +1,3 @@
-
 import re
 from math import sqrt
 from pathlib import Path
@@ -17,11 +16,9 @@ import overall_survival_data
 import prostate_cancer_specific_survival_data
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = PROJECT_ROOT / "output" / "tables"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-ALPHA = 0.05
-CENTER_TIME = 6.0
+TABLE_DIR = PROJECT_ROOT / "output" / "tables"
+PH_P_THRESHOLD = 0.05
+REFERENCE_MONTH = 6.0
 TIME_FUNCTIONS = ["log", "linear", "sqrt"]
 Z_975 = 1.959963984540054
 
@@ -31,26 +28,26 @@ def time_function(name, time):
     if np.any(values <= 0):
         raise ValueError("Follow-up time must be positive")
     if name == "log":
-        return np.log(values / CENTER_TIME)
+        return np.log(values / REFERENCE_MONTH)
     if name == "linear":
-        return (values - CENTER_TIME) / CENTER_TIME
+        return (values - REFERENCE_MONTH) / REFERENCE_MONTH
     if name == "sqrt":
-        return np.sqrt(values) - sqrt(CENTER_TIME)
+        return np.sqrt(values) - sqrt(REFERENCE_MONTH)
     raise ValueError(f"Unknown time function: {name}")
 
 
-def conventional_fit(frame, time_col, event_col):
+def fit_cox_model(frame, time_column, event_column):
     model = CoxPHFitter()
     model.fit(
         frame,
-        duration_col=time_col,
-        event_col=event_col,
+        duration_col=time_column,
+        event_col=event_column,
         show_progress=False,
     )
     return model
 
 
-def ph_screen(model, frame):
+def test_proportional_hazards(model, frame):
     return proportional_hazard_test(
         model,
         frame,
@@ -60,15 +57,15 @@ def ph_screen(model, frame):
 
 def to_counting_process(
     frame,
-    time_col,
-    event_col,
+    time_column,
+    event_column,
     flagged_terms,
     function_name,
 ):
     base = frame.reset_index(drop=True).copy()
     base.insert(0, "id", np.arange(len(base), dtype=int))
-    durations = base[time_col].astype(int).to_numpy()
-    if not np.allclose(durations, base[time_col].to_numpy()):
+    durations = base[time_column].astype(int).to_numpy()
+    if not np.allclose(durations, base[time_column].to_numpy()):
         raise ValueError("Expected integer SEER survival months")
     if np.any(durations <= 0):
         raise ValueError("Expected strictly positive follow-up")
@@ -77,27 +74,27 @@ def to_counting_process(
     long["stop"] = long.groupby("id").cumcount() + 1
     long["start"] = long["stop"] - 1
     long["event_long"] = (
-        (long[event_col] == 1) & (long["stop"] == long[time_col])
+        (long[event_column] == 1) & (long["stop"] == long[time_column])
     ).astype(int)
 
     transform = time_function(function_name, long["stop"].to_numpy())
     for term in flagged_terms:
         long[f"tv__{term}"] = long[term].to_numpy() * transform
 
-    return long.drop(columns=[time_col, event_col])
+    return long.drop(columns=[time_column, event_column])
 
 
-def extended_fit(
+def fit_time_varying_cox_model(
     frame,
-    time_col,
-    event_col,
+    time_column,
+    event_column,
     flagged_terms,
     function_name,
 ):
     long = to_counting_process(
         frame,
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         flagged_terms,
         function_name,
     )
@@ -140,44 +137,44 @@ def pretty_term(term):
     return term
 
 
-def fmt_hr(estimate):
+def format_hazard_ratio(estimate):
     return (
         f"{estimate['HR']:.4f} "
         f"({estimate['CI lower']:.4f}-{estimate['CI upper']:.4f})"
     )
 
 
-def fmt_p(p):
+def format_p_value(p):
     return "< 0.001" if p < 0.001 else f"{p:.4f}"
 
 
-def primary_frame(module, df):
-    subset = df[df["era"].isin(module.ERAS_INCLUDED)].copy()
-    frame = module.prepare_cox_df(subset)
-    time_col, event_col = frame.columns[:2]
+def primary_frame(module, data):
+    subset = data[data["era"].isin(module.ERAS_INCLUDED)].copy()
+    frame = module.prepare_cox_data(subset)
+    time_column, event_column = frame.columns[:2]
     target = f"era_{module.ERA_LABELS[4]}"
-    return subset, frame, time_col, event_col, target
+    return subset, frame, time_column, event_column, target
 
 
-def collect_model_specs(df_os, df_pca):
+def collect_model_specs(os_data, pcss_data):
     specs = []
-    for key, output, endpoint, module, df in [
+    for key, output, endpoint, module, data in [
         (
             "primary_os",
             "Table 3",
             "Overall Survival",
             cox_os,
-            df_os,
+            os_data,
         ),
         (
             "primary_pcss",
             "Supplementary Table 3",
             "Prostate Cancer-Specific Survival",
             cox_pcss,
-            df_pca,
+            pcss_data,
         ),
     ]:
-        _, frame, time_col, event_col, target = primary_frame(module, df)
+        _, frame, time_column, event_column, target = primary_frame(module, data)
         specs.append(
             {
                 "key": key,
@@ -185,26 +182,25 @@ def collect_model_specs(df_os, df_pca):
                 "endpoint": endpoint,
                 "stratum": "Overall",
                 "frame": frame,
-                "time_col": time_col,
-                "event_col": event_col,
+                "time_column": time_column,
+                "event_column": event_column,
                 "target": target,
             }
         )
 
     endpoint_configs = [
-        ("Overall Survival", df_os, "os_months", "os_event"),
+        ("Overall Survival", os_data, "os_months", "os_event"),
         (
             "Prostate Cancer-Specific Survival",
-            df_pca,
+            pcss_data,
             "pca_months",
             "pca_event",
         ),
     ]
-    for endpoint, df, time_col, event_col in endpoint_configs:
+    for endpoint, data, time_column, event_column in endpoint_configs:
         for stage in cox_stage.STAGES:
-            subset = df[
-                (df["m_stage"] == stage)
-                & df["era"].isin(cox_stage.ERAS_INCLUDED)
+            subset = data[
+                (data["m_stage"] == stage) & data["era"].isin(cox_stage.ERAS_INCLUDED)
             ].copy()
             specs.append(
                 {
@@ -212,21 +208,20 @@ def collect_model_specs(df_os, df_pca):
                     "output": "Supplementary Table 4",
                     "endpoint": endpoint,
                     "stratum": stage,
-                    "frame": cox_stage.prepare_cox_df(
+                    "frame": cox_stage.prepare_cox_data(
                         subset,
-                        time_col,
-                        event_col,
+                        time_column,
+                        event_column,
                     ),
-                    "time_col": time_col,
-                    "event_col": event_col,
+                    "time_column": time_column,
+                    "event_column": event_column,
                     "target": "era4",
                 }
             )
 
         for race in cox_race.RACES:
-            subset = df[
-                (df["race"] == race)
-                & df["era"].isin(cox_race.ERAS_INCLUDED)
+            subset = data[
+                (data["race"] == race) & data["era"].isin(cox_race.ERAS_INCLUDED)
             ].copy()
             specs.append(
                 {
@@ -234,28 +229,28 @@ def collect_model_specs(df_os, df_pca):
                     "output": "Supplementary Table 6",
                     "endpoint": endpoint,
                     "stratum": race,
-                    "frame": cox_race.prepare_cox_df(
+                    "frame": cox_race.prepare_cox_data(
                         subset,
-                        time_col,
-                        event_col,
+                        time_column,
+                        event_column,
                     ),
-                    "time_col": time_col,
-                    "event_col": event_col,
+                    "time_column": time_column,
+                    "event_column": event_column,
                     "target": "era4",
                 }
             )
 
         for race in cox_stage_race.RACES:
             for stage in cox_stage_race.STAGES:
-                subset = df[
-                    (df["race"] == race)
-                    & (df["m_stage"] == stage)
-                    & df["era"].isin(cox_stage_race.ERAS_INCLUDED)
+                subset = data[
+                    (data["race"] == race)
+                    & (data["m_stage"] == stage)
+                    & data["era"].isin(cox_stage_race.ERAS_INCLUDED)
                 ].copy()
-                frame = cox_stage_race.prepare_cox_df(
+                frame = cox_stage_race.prepare_cox_data(
                     subset,
-                    time_col,
-                    event_col,
+                    time_column,
+                    event_column,
                 )
                 specs.append(
                     {
@@ -264,8 +259,8 @@ def collect_model_specs(df_os, df_pca):
                         "endpoint": endpoint,
                         "stratum": f"{race}; {stage}",
                         "frame": frame,
-                        "time_col": time_col,
-                        "event_col": event_col,
+                        "time_column": time_column,
+                        "event_column": event_column,
                         "target": "era4",
                         "omitted_terms": [
                             term
@@ -279,18 +274,18 @@ def collect_model_specs(df_os, df_pca):
 
 def fit_screened_model(spec, function_name, cached=None):
     if cached is None:
-        conventional = conventional_fit(
+        conventional = fit_cox_model(
             spec["frame"],
-            spec["time_col"],
-            spec["event_col"],
+            spec["time_column"],
+            spec["event_column"],
         )
-        screen = ph_screen(conventional, spec["frame"])
+        screen = test_proportional_hazards(conventional, spec["frame"])
     else:
         conventional = cached["conventional"]
         screen = cached["screen"]
 
     target_ph_p = float(screen.loc[spec["target"], "p"])
-    if target_ph_p < ALPHA:
+    if target_ph_p < PH_P_THRESHOLD:
         raise RuntimeError(
             f"{spec['key']}: displayed era term failed PH screening "
             f"(p={target_ph_p:.6g})"
@@ -298,16 +293,16 @@ def fit_screened_model(spec, function_name, cached=None):
     flagged = [
         term
         for term, row in screen.iterrows()
-        if float(row["p"]) < ALPHA and term != spec["target"]
+        if float(row["p"]) < PH_P_THRESHOLD and term != spec["target"]
     ]
     if flagged:
         if cached is not None and cached.get("model") is not None:
             model = cached["model"]
         else:
-            model = extended_fit(
+            model = fit_time_varying_cox_model(
                 spec["frame"],
-                spec["time_col"],
-                spec["event_col"],
+                spec["time_column"],
+                spec["event_column"],
                 flagged,
                 function_name,
             )
@@ -330,26 +325,24 @@ def select_time_function(primary_specs):
     comparison_rows = []
     cached = {}
     for spec in primary_specs:
-        conventional = conventional_fit(
+        conventional = fit_cox_model(
             spec["frame"],
-            spec["time_col"],
-            spec["event_col"],
+            spec["time_column"],
+            spec["event_column"],
         )
-        screen = ph_screen(conventional, spec["frame"])
+        screen = test_proportional_hazards(conventional, spec["frame"])
         flagged = [
             term
             for term, row in screen.iterrows()
-            if float(row["p"]) < ALPHA and term != spec["target"]
+            if float(row["p"]) < PH_P_THRESHOLD and term != spec["target"]
         ]
-        if float(screen.loc[spec["target"], "p"]) < ALPHA:
-            raise RuntimeError(
-                f"{spec['key']}: displayed era term failed PH screening"
-            )
+        if float(screen.loc[spec["target"], "p"]) < PH_P_THRESHOLD:
+            raise RuntimeError(f"{spec['key']}: displayed era term failed PH screening")
         for function_name in TIME_FUNCTIONS:
-            model = extended_fit(
+            model = fit_time_varying_cox_model(
                 spec["frame"],
-                spec["time_col"],
-                spec["event_col"],
+                spec["time_column"],
+                spec["event_column"],
                 flagged,
                 function_name,
             )
@@ -379,9 +372,7 @@ def select_time_function(primary_specs):
     )
     selected = totals.sort_values("Summed partial AIC").iloc[0]["Time function"]
     comparison = comparison.merge(totals, on="Time function", how="left")
-    comparison["Selected common function"] = comparison["Time function"].eq(
-        selected
-    )
+    comparison["Selected common function"] = comparison["Time function"].eq(selected)
     return selected, comparison, cached
 
 
@@ -422,14 +413,14 @@ def configuration_row(spec, result, function_name):
     failed = [
         term
         for term, row in result["screen"].iterrows()
-        if float(row["p"]) < ALPHA
+        if float(row["p"]) < PH_P_THRESHOLD
     ]
     return {
         "Corresponding result": spec["output"],
         "Endpoint": spec["endpoint"],
         "Stratum": spec["stratum"],
         "N": len(spec["frame"]),
-        "Events": int(spec["frame"][spec["event_col"]].sum()),
+        "Events": int(spec["frame"][spec["event_column"]].sum()),
         "Era-term Schoenfeld p": result["target_ph_p"],
         "Final model": result["model_type"],
         "Time function": (
@@ -471,8 +462,8 @@ def estimate_row(spec, result):
 def replace_target(table, mask, estimate):
     if int(mask.sum()) != 1:
         raise RuntimeError(f"Expected one table row, found {int(mask.sum())}")
-    table.loc[mask, "Adjusted HR (95% CI)"] = fmt_hr(estimate)
-    table.loc[mask, "Adj p-value"] = fmt_p(estimate["p"])
+    table.loc[mask, "Adjusted HR (95% CI)"] = format_hazard_ratio(estimate)
+    table.loc[mask, "Adj p-value"] = format_p_value(estimate["p"])
 
 
 def primary_term_row(table, term, module):
@@ -483,13 +474,9 @@ def primary_term_row(table, term, module):
     if term.startswith("race_"):
         return table["Variable"].eq(f"  {term.replace('race_', '', 1)}")
     if term.startswith("m_stage_"):
-        return table["Variable"].eq(
-            f"  {term.replace('m_stage_', '', 1)}"
-        )
+        return table["Variable"].eq(f"  {term.replace('m_stage_', '', 1)}")
     if term == "prostatectomy":
-        section = table.index[
-            table["Variable"].eq("Radical Prostatectomy")
-        ][0]
+        section = table.index[table["Variable"].eq("Radical Prostatectomy")][0]
         mask = pd.Series(False, index=table.index)
         mask.loc[section + 2] = True
         return mask
@@ -518,7 +505,7 @@ def replace_primary_adjusted_estimates(table, result, module):
     )
 
 
-def inline_p(value):
+def format_inline_p_value(value):
     value = str(value).strip().replace(" ", "")
     if value.startswith("<"):
         return f"p{value}"
@@ -546,7 +533,7 @@ def estimate_with_p(estimate, p_value):
         return ""
     if pd.isna(p_value) or not str(p_value).strip():
         return str(estimate)
-    return f"{compact_hr(estimate)}; {inline_p(p_value)}"
+    return f"{compact_hr(estimate)}; {format_inline_p_value(p_value)}"
 
 
 def compact_primary_supplement(table):
@@ -569,6 +556,7 @@ def compact_stratified_table(table, include_race=False, include_stage=False):
     race_labels = {
         "Non-Hispanic White": "NHW",
         "Non-Hispanic Black": "NHB",
+        "Non-Hispanic Asian/PI": "NHA/PI",
     }
 
     def analysis_label(row):
@@ -610,38 +598,28 @@ def compact_stratified_table(table, include_race=False, include_stage=False):
     return compact
 
 
-def build_updated_tables(df_os, df_pca, result_by_key):
-    os_subset, os_frame, _, _, _ = primary_frame(cox_os, df_os)
-    os_mv = cox_os.fit_multivariable(os_frame)
-    os_table = cox_os.build_table(os_subset, os_frame, os_mv)
-    replace_target(
-        os_table,
-        os_table["Variable"].eq(f"  {cox_os.ERA_LABELS[4]}"),
-        result_by_key["primary_os"]["estimate"],
-    )
+def build_updated_tables(os_data, pcss_data, result_by_key):
+    os_subset, os_frame, _, _, _ = primary_frame(cox_os, os_data)
+    os_adjusted_results = cox_os.fit_multivariable(os_frame)
+    os_table = cox_os.build_table(os_subset, os_frame, os_adjusted_results)
     os_table = replace_primary_adjusted_estimates(
         os_table,
         result_by_key["primary_os"],
         cox_os,
     )
 
-    pcss_subset, pcss_frame, _, _, _ = primary_frame(cox_pcss, df_pca)
-    pcss_mv = cox_pcss.fit_multivariable(pcss_frame)
-    pcss_table = cox_pcss.build_table(pcss_subset, pcss_frame, pcss_mv)
-    replace_target(
-        pcss_table,
-        pcss_table["Variable"].eq(f"  {cox_pcss.ERA_LABELS[4]}"),
-        result_by_key["primary_pcss"]["estimate"],
-    )
+    pcss_subset, pcss_frame, _, _, _ = primary_frame(cox_pcss, pcss_data)
+    pcss_adjusted_results = cox_pcss.fit_multivariable(pcss_frame)
+    pcss_table = cox_pcss.build_table(pcss_subset, pcss_frame, pcss_adjusted_results)
     pcss_table = replace_primary_adjusted_estimates(
         pcss_table,
         result_by_key["primary_pcss"],
         cox_pcss,
     )
 
-    stage_table = cox_stage.build_table(df_os, df_pca)
-    race_table = cox_race.build_table(df_os, df_pca)
-    stage_race_table = cox_stage_race.build_table(df_os, df_pca)
+    stage_table = cox_stage.build_table(os_data, pcss_data)
+    race_table = cox_race.build_table(os_data, pcss_data)
+    stage_race_table = cox_stage_race.build_table(os_data, pcss_data)
 
     for key, result in result_by_key.items():
         parts = key.split("|")
@@ -649,16 +627,14 @@ def build_updated_tables(df_os, df_pca, result_by_key):
             _, endpoint, stage = parts
             replace_target(
                 stage_table,
-                stage_table["Survival"].eq(endpoint)
-                & stage_table["Stage"].eq(stage),
+                stage_table["Survival"].eq(endpoint) & stage_table["Stage"].eq(stage),
                 result["estimate"],
             )
         elif parts[0] == "race":
             _, endpoint, race = parts
             replace_target(
                 race_table,
-                race_table["Survival"].eq(endpoint)
-                & race_table["Race"].eq(race),
+                race_table["Survival"].eq(endpoint) & race_table["Race"].eq(race),
                 result["estimate"],
             )
         elif parts[0] == "stage_race":
@@ -689,16 +665,15 @@ def build_updated_tables(df_os, df_pca, result_by_key):
         ("19_cox_by_stage_race.csv", stage_race_table),
     ]
     for filename, table in outputs:
-        table.to_csv(OUTPUT_DIR / filename, index=False)
+        table.to_csv(TABLE_DIR / filename, index=False)
 
 
 def main():
-    df_os = overall_survival_data.load_and_prepare_data()
-    df_pca = prostate_cancer_specific_survival_data.load_and_prepare_data()
-    specs = collect_model_specs(df_os, df_pca)
-    primary_specs = [
-        spec for spec in specs if spec["key"].startswith("primary_")
-    ]
+    TABLE_DIR.mkdir(parents=True, exist_ok=True)
+    os_data = overall_survival_data.load_and_prepare_data()
+    pcss_data = prostate_cancer_specific_survival_data.load_and_prepare_data()
+    specs = collect_model_specs(os_data, pcss_data)
+    primary_specs = [spec for spec in specs if spec["key"].startswith("primary_")]
     selected, comparison, cached = select_time_function(primary_specs)
 
     configuration_rows = []
@@ -709,29 +684,27 @@ def main():
         cached_fit = cached.get((spec["key"], selected))
         result = fit_screened_model(spec, selected, cached=cached_fit)
         result_by_key[spec["key"]] = result
-        configuration_rows.append(
-            configuration_row(spec, result, selected)
-        )
+        configuration_rows.append(configuration_row(spec, result, selected))
         estimates.append(estimate_row(spec, result))
         coefficients.extend(coefficient_rows(spec, result, selected))
 
     comparison.to_csv(
-        OUTPUT_DIR / "21_ph_time_function_comparison.csv",
+        TABLE_DIR / "21_ph_time_function_comparison.csv",
         index=False,
     )
     pd.DataFrame(configuration_rows).to_csv(
-        OUTPUT_DIR / "21_ph_aware_model_configurations.csv",
+        TABLE_DIR / "21_ph_aware_model_configurations.csv",
         index=False,
     )
     pd.DataFrame(estimates).to_csv(
-        OUTPUT_DIR / "21_ph_aware_era_estimates.csv",
+        TABLE_DIR / "21_ph_aware_era_estimates.csv",
         index=False,
     )
     pd.DataFrame(coefficients).to_csv(
-        OUTPUT_DIR / "21_ph_aware_coefficients.csv",
+        TABLE_DIR / "21_ph_aware_coefficients.csv",
         index=False,
     )
-    build_updated_tables(df_os, df_pca, result_by_key)
+    build_updated_tables(os_data, pcss_data, result_by_key)
 
 
 if __name__ == "__main__":

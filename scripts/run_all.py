@@ -1,7 +1,10 @@
-
+import adjusted_race_era_survival
 import cox_ph_diagnostics
 import era_race_interaction
-import median_os_by_year_white_black
+import export_manuscript_figures
+import export_manuscript_tables
+import export_model_tables
+import local_treatment_sensitivity
 import median_survival_by_era_and_race
 import median_survival_by_stage_race_and_era
 import os_km_by_era_and_stage
@@ -16,7 +19,6 @@ import pcss_km_by_race_and_era
 import pcss_km_by_stage_race_and_era
 import pcss_km_white_black_by_era
 import ph_aware_cox
-
 
 ANALYSES = [
     ("Overall-survival curves by era and stage", os_km_by_era_and_stage.main),
@@ -44,7 +46,6 @@ ANALYSES = [
         "White-Black cancer-specific survival curves by era",
         pcss_km_white_black_by_era.main,
     ),
-    ("Annual median overall survival", median_os_by_year_white_black.main),
     ("Patient characteristics", patient_characteristics.main),
     ("Median survival by era and race", median_survival_by_era_and_race.main),
     (
@@ -54,6 +55,14 @@ ANALYSES = [
     ("Proportional-hazards diagnostics", cox_ph_diagnostics.main),
     ("Final PH-aware Cox tables", ph_aware_cox.main),
     ("Era-by-race interaction models", era_race_interaction.main),
+    (
+        "Adjusted race-by-era survival probabilities",
+        adjusted_race_era_survival.main,
+    ),
+    (
+        "Local-treatment sensitivity analysis",
+        local_treatment_sensitivity.main,
+    ),
 ]
 
 
@@ -61,6 +70,12 @@ def main():
     for description, run_analysis in ANALYSES:
         print(f"Running: {description}", flush=True)
         run_analysis()
+    print("Assembling final model tables", flush=True)
+    export_model_tables.main()
+    print("Exporting manuscript table workbook", flush=True)
+    export_manuscript_tables.main()
+    print("Exporting manuscript figures", flush=True)
+    export_manuscript_figures.main()
 
 
 if __name__ == "__main__":

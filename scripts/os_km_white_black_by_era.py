@@ -1,27 +1,22 @@
-
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-import seaborn as sns
-
-sns.set_theme(style="whitegrid")
 import pandas as pd
+import seaborn as sns
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
 
-from overall_survival_data import (
-    ERA_LABELS,
-    load_and_prepare_data,
-)
+from overall_survival_data import ERA_LABELS, load_and_prepare_data
+
+sns.set_theme(style="whitegrid")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = PROJECT_ROOT / "output" / "figures"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
+FIGURE_DIR = PROJECT_ROOT / "output" / "figures"
 ERAS = [1, 2, 3, 4]
 RACE_ORDER = ["Non-Hispanic White", "Non-Hispanic Black"]
 RACE_COLORS = {
@@ -32,39 +27,40 @@ RACE_SHORT = {
     "Non-Hispanic White": "NH White",
     "Non-Hispanic Black": "NH Black",
 }
-
-X_LIMIT = 24
+ANALYSIS_MONTHS = 24
 PANEL_LETTERS = {1: "A", 2: "B", 3: "C", 4: "D"}
 
 
-def format_p_value(p_val):
-    if p_val is None:
+def format_p_value(p_value):
+    if p_value is None:
         return "N/A"
-    return "p < 0.0001" if p_val < 0.0001 else f"p = {p_val:.4f}"
+    return "p < 0.0001" if p_value < 0.0001 else f"p = {p_value:.4f}"
 
 
 def panel_title(era: int, n_total: int):
     return f"{ERA_LABELS[era]} (n = {n_total:,})"
 
 
-def plot_panel(ax, df_era: pd.DataFrame, era: int):
+def plot_panel(ax, era_data: pd.DataFrame, era: int):
     for race in RACE_ORDER:
-        sub = (
-            df_era[df_era["race"] == race]
+        subset = (
+            era_data[era_data["race"] == race]
             .dropna(subset=["os_months", "os_event"])
             .copy()
         )
-        if len(sub) == 0:
+        if len(subset) == 0:
             continue
-        mask = sub["os_months"] > X_LIMIT
-        sub.loc[mask, "os_event"] = 0
-        sub.loc[mask, "os_months"] = X_LIMIT
+        mask = subset["os_months"] > ANALYSIS_MONTHS
+        subset.loc[mask, "os_event"] = 0
+        subset.loc[mask, "os_months"] = ANALYSIS_MONTHS
 
-        kmf = KaplanMeierFitter()
-        kmf.fit(
-            sub["os_months"], event_observed=sub["os_event"], label=RACE_SHORT[race]
+        km_model = KaplanMeierFitter()
+        km_model.fit(
+            subset["os_months"],
+            event_observed=subset["os_event"],
+            label=RACE_SHORT[race],
         )
-        kmf.plot_survival_function(
+        km_model.plot_survival_function(
             ax=ax,
             ci_show=False,
             color=RACE_COLORS[race],
@@ -72,30 +68,30 @@ def plot_panel(ax, df_era: pd.DataFrame, era: int):
         )
 
     white = (
-        df_era[df_era["race"] == "Non-Hispanic White"]
+        era_data[era_data["race"] == "Non-Hispanic White"]
         .dropna(subset=["os_months", "os_event"])
         .copy()
     )
-    mask = white["os_months"] > X_LIMIT
+    mask = white["os_months"] > ANALYSIS_MONTHS
     white.loc[mask, "os_event"] = 0
-    white.loc[mask, "os_months"] = X_LIMIT
+    white.loc[mask, "os_months"] = ANALYSIS_MONTHS
     black = (
-        df_era[df_era["race"] == "Non-Hispanic Black"]
+        era_data[era_data["race"] == "Non-Hispanic Black"]
         .dropna(subset=["os_months", "os_event"])
         .copy()
     )
-    mask = black["os_months"] > X_LIMIT
+    mask = black["os_months"] > ANALYSIS_MONTHS
     black.loc[mask, "os_event"] = 0
-    black.loc[mask, "os_months"] = X_LIMIT
+    black.loc[mask, "os_months"] = ANALYSIS_MONTHS
 
     if len(white) > 0 and len(black) > 0:
-        lr = logrank_test(
+        logrank_result = logrank_test(
             white["os_months"],
             black["os_months"],
             event_observed_A=white["os_event"],
             event_observed_B=black["os_event"],
         )
-        p_text = format_p_value(lr.p_value)
+        p_text = format_p_value(logrank_result.p_value)
     else:
         p_text = "N/A"
 
@@ -112,7 +108,7 @@ def plot_panel(ax, df_era: pd.DataFrame, era: int):
         ),
     )
 
-    ax.set_xlim(0, X_LIMIT)
+    ax.set_xlim(0, ANALYSIS_MONTHS)
     ax.set_ylim(0, 1.05)
     ax.text(
         -0.12,
@@ -124,7 +120,7 @@ def plot_panel(ax, df_era: pd.DataFrame, era: int):
         va="bottom",
     )
     ax.set_title(
-        panel_title(era, len(df_era)), fontsize=13, fontweight="bold", loc="center"
+        panel_title(era, len(era_data)), fontsize=13, fontweight="bold", loc="center"
     )
     ax.set_xlabel("Time (Years)", fontsize=13)
     ax.set_ylabel("Proportion Surviving", fontsize=13)
@@ -137,16 +133,17 @@ def plot_panel(ax, df_era: pd.DataFrame, era: int):
 
 
 def main():
-    df = load_and_prepare_data()
-    df = df[df["race"].isin(RACE_ORDER) & df["era"].isin(ERAS)].copy()
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    data = load_and_prepare_data()
+    data = data[data["race"].isin(RACE_ORDER) & data["era"].isin(ERAS)].copy()
     fig, axes = plt.subplots(2, 2, figsize=(11, 9), sharex=False, sharey=False)
     axes_flat = axes.flatten()
     for ax, era in zip(axes_flat, ERAS):
-        df_era = df[df["era"] == era].copy()
-        plot_panel(ax, df_era, era)
+        era_data = data[data["era"] == era].copy()
+        plot_panel(ax, era_data, era)
     plt.tight_layout()
-    out_path = OUTPUT_DIR / "09_os_km_white_black_by_era.png"
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    output_path = FIGURE_DIR / "09_os_km_white_black_by_era.png"
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 

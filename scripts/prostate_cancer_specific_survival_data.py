@@ -1,12 +1,11 @@
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = PROJECT_ROOT / "pca-survival" / "data" / "export_causespecific.csv"
-
-COL_RENAMING_MAP = {
+COLUMN_NAMES = {
     "Age recode with <1 year olds and 90+": "age_recode",
     "Year of diagnosis": "year_dx",
     "Race and origin recode (NHW, NHB, NHAIAN, NHAPI, Hispanic)": "race_raw",
@@ -25,28 +24,23 @@ COL_RENAMING_MAP = {
     "End Calc Vital Status (Adjusted)": "end_calc_status",
     "Number of Intervals (Calculated)": "surv_months",
 }
-
 ERA_LABELS = {
     1: "Pre-Docetaxel (2000-2003)",
     2: "Post-Docetaxel (2004-2009)",
     3: "Early ARPI (2010-2016)",
     4: "Modern ARPI (2017-2020)",
 }
-
 ERA_COLORS = {
     1: "#1f77b4",
     2: "#ff7f0e",
     3: "#2ca02c",
     4: "#d62728",
 }
-
 NO_RADIATION_TREATMENT = {
     "None/Unknown",
     "Refused (1988+)",
     "Recommended, unknown if administered",
 }
-
-NO_SURGICAL_CODES = {0, 99}
 PROSTATECTOMY_CODES = {50, 70}
 RACE_MAP = {
     "Non-Hispanic White": "Non-Hispanic White",
@@ -72,17 +66,17 @@ def derive_cause_specific_death_event(end_calc_status: pd.Series) -> pd.Series:
     return (is_dead_text | is_dead_numeric).astype(int)
 
 
-def harmonize_m_stage(df: pd.DataFrame) -> pd.Series:
-    stage = pd.Series(index=df.index, dtype="object")
-    yr = df["year_dx"]
+def harmonize_m_stage(data: pd.DataFrame) -> pd.Series:
+    stage = pd.Series(index=data.index, dtype="object")
+    yr = data["year_dx"]
 
-    m3 = df["m_ajcc3"].astype(str)
+    m3 = data["m_ajcc3"].astype(str)
     mask = yr <= 2003
     stage[
         mask & m3.str.contains("M1", na=False) & ~m3.str.contains("Blank", na=False)
     ] = "M1"
 
-    m6 = df["m_ajcc6"].astype(str)
+    m6 = data["m_ajcc6"].astype(str)
     mask = (yr >= 2004) & (yr <= 2009)
     stage[mask & m6.str.contains("M1a", na=False)] = "M1a"
     stage[mask & m6.str.contains("M1b", na=False)] = "M1b"
@@ -90,7 +84,7 @@ def harmonize_m_stage(df: pd.DataFrame) -> pd.Series:
     stage[mask & m6.str.contains("M1NOS", na=False)] = "M1NOS"
     stage[mask & m6.str.match(r"^M1$", na=False)] = "M1NOS"
 
-    m7 = df["m_ajcc7"].astype(str)
+    m7 = data["m_ajcc7"].astype(str)
     mask = (yr >= 2010) & (yr <= 2015)
     stage[mask & m7.str.contains("M1a", na=False)] = "M1a"
     stage[mask & m7.str.contains("M1b", na=False)] = "M1b"
@@ -98,7 +92,7 @@ def harmonize_m_stage(df: pd.DataFrame) -> pd.Series:
     stage[mask & m7.str.contains("M1NOS", na=False)] = "M1NOS"
     stage[mask & m7.str.match(r"^M1$", na=False)] = "M1NOS"
 
-    mc = df["m_seer_combined"].astype(str).str.upper()
+    mc = data["m_seer_combined"].astype(str).str.upper()
     mask = (yr >= 2016) & (yr <= 2017)
     stage[mask & mc.str.contains("1A", na=False)] = "M1a"
     stage[mask & mc.str.contains("1B", na=False)] = "M1b"
@@ -110,7 +104,7 @@ def harmonize_m_stage(df: pd.DataFrame) -> pd.Series:
     )
     stage[nos_mask] = "M1NOS"
 
-    me = df["m_eod2018"].astype(str)
+    me = data["m_eod2018"].astype(str)
     mask = yr >= 2018
     stage[mask & me.str.contains("M1a", na=False)] = "M1a"
     stage[mask & me.str.contains("M1b", na=False)] = "M1b"
@@ -122,54 +116,48 @@ def harmonize_m_stage(df: pd.DataFrame) -> pd.Series:
 
 
 def load_and_prepare_data() -> pd.DataFrame:
-    df = pd.read_csv(DATA_PATH)
-    df = df.rename(columns=COL_RENAMING_MAP)
+    data = pd.read_csv(DATA_PATH)
+    data = data.rename(columns=COLUMN_NAMES)
 
-    df = df[(df["year_dx"] >= 2000) & (df["year_dx"] <= 2020)].copy()
-    df["age"] = df["age_single"].astype(str).str.extract(r"(\d+)").astype(float)
-    df = df[df["age"] >= 18].copy()
+    data = data[(data["year_dx"] >= 2000) & (data["year_dx"] <= 2020)].copy()
+    data["age"] = data["age_single"].astype(str).str.extract(r"(\d+)").astype(float)
+    data = data[data["age"] >= 18].copy()
 
     era_bins = [1999, 2003, 2009, 2016, 2020]
     era_labels = [1, 2, 3, 4]
-    df["era"] = (
+    data["era"] = (
         pd.cut(
-            df["year_dx"],
+            data["year_dx"],
             bins=era_bins,
             labels=era_labels,
         )
         .astype(float)
         .astype("Int64")
     )
-    df["era_label"] = df["era"].map(ERA_LABELS)
+    data["era_label"] = data["era"].map(ERA_LABELS)
 
-    df["m_stage"] = harmonize_m_stage(df)
-    df = df.dropna(subset=["m_stage"]).copy()
+    data["m_stage"] = harmonize_m_stage(data)
+    data = data.dropna(subset=["m_stage"]).copy()
 
-    df["race"] = df["race_raw"].map(RACE_MAP).fillna("Unknown")
+    data["race"] = data["race_raw"].map(RACE_MAP).fillna("Unknown")
 
-    surg_code_num = pd.to_numeric(df["surg_code"], errors="coerce")
-    had_surg = ~surg_code_num.isin(NO_SURGICAL_CODES)
-    had_rad = ~df["rad_recode"].isin(NO_RADIATION_TREATMENT)
+    surg_code_num = pd.to_numeric(data["surg_code"], errors="coerce")
+    had_rad = ~data["rad_recode"].isin(NO_RADIATION_TREATMENT)
 
-    df["prostatectomy"] = surg_code_num.isin(PROSTATECTOMY_CODES).astype(int)
-    df["radiotherapy"] = had_rad.astype(int)
-    df["prostate_surgery"] = had_surg.astype(int)
-    df["local_tx"] = (had_surg | had_rad).astype(int)
-    df["local_tx_label"] = df["local_tx"].map(
-        {1: "Prostatectomy and/or Radiotherapy", 0: "No local therapy"}
-    )
+    data["prostatectomy"] = surg_code_num.isin(PROSTATECTOMY_CODES).astype(int)
+    data["radiotherapy"] = had_rad.astype(int)
 
-    df["pca_event"] = derive_cause_specific_death_event(df["end_calc_status"])
-    df["pca_months"] = df["surv_months"].astype(float)
-    df = df.dropna(subset=["pca_months"]).copy()
+    data["pca_event"] = derive_cause_specific_death_event(data["end_calc_status"])
+    data["pca_months"] = data["surv_months"].astype(float)
+    data = data.dropna(subset=["pca_months"]).copy()
 
-    return df.reset_index(drop=True)
+    return data.reset_index(drop=True)
 
 
 if __name__ == "__main__":
-    df = load_and_prepare_data()
-    print(f"n = {len(df):,}")
-    print(df["era"].value_counts().sort_index().to_string())
-    print(df["m_stage"].value_counts().to_string())
-    print(df["race"].value_counts().to_string())
-    print(f"PCA event rate: {df['pca_event'].mean():.3f}")
+    data = load_and_prepare_data()
+    print(f"n = {len(data):,}")
+    print(data["era"].value_counts().sort_index().to_string())
+    print(data["m_stage"].value_counts().to_string())
+    print(data["race"].value_counts().to_string())
+    print(f"PCA event rate: {data['pca_event'].mean():.3f}")

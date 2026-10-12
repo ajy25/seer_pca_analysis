@@ -1,4 +1,3 @@
-
 from math import erf, sqrt
 from pathlib import Path
 
@@ -11,23 +10,21 @@ import overall_survival_data
 import prostate_cancer_specific_survival_data
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = PROJECT_ROOT / "output" / "tables"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-ALPHA = 0.05
-CENSOR_TIME = 24
-CENTER_TIME = 6.0
+TABLE_DIR = PROJECT_ROOT / "output" / "tables"
+PH_P_THRESHOLD = 0.05
+ANALYSIS_MONTHS = 24
+REFERENCE_MONTH = 6.0
 Z_975 = 1.959963984540054
 RACES = ["Non-Hispanic White", "Non-Hispanic Black"]
 M_STAGE_REF = "M1b"
 
 
-def prepare_cox_df(df, time_col, event_col, include_interaction):
-    cox = (
-        df[
+def prepare_cox_data(data, time_column, event_column, include_interaction):
+    cox_data = (
+        data[
             [
-                time_col,
-                event_col,
+                time_column,
+                event_column,
                 "era",
                 "race",
                 "age",
@@ -39,14 +36,14 @@ def prepare_cox_df(df, time_col, event_col, include_interaction):
         .copy()
         .dropna()
     )
-    mask = cox[time_col] > CENSOR_TIME
-    cox.loc[mask, event_col] = 0
-    cox.loc[mask, time_col] = CENSOR_TIME
-    cox["era4"] = (cox["era"] == 4).astype(int)
-    cox["black"] = (cox["race"] == "Non-Hispanic Black").astype(int)
-    cox["era4_x_black"] = cox["era4"] * cox["black"]
+    mask = cox_data[time_column] > ANALYSIS_MONTHS
+    cox_data.loc[mask, event_column] = 0
+    cox_data.loc[mask, time_column] = ANALYSIS_MONTHS
+    cox_data["era4"] = (cox_data["era"] == 4).astype(int)
+    cox_data["black"] = (cox_data["race"] == "Non-Hispanic Black").astype(int)
+    cox_data["era4_x_black"] = cox_data["era4"] * cox_data["black"]
     stage_dummies = pd.get_dummies(
-        cox["m_stage"],
+        cox_data["m_stage"],
         prefix="m_stage",
         drop_first=False,
     )
@@ -55,8 +52,8 @@ def prepare_cox_df(df, time_col, event_col, include_interaction):
         errors="ignore",
     )
     columns = [
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         "era4",
         "black",
         "age",
@@ -65,21 +62,21 @@ def prepare_cox_df(df, time_col, event_col, include_interaction):
     ]
     if include_interaction:
         columns.insert(4, "era4_x_black")
-    return pd.concat([cox[columns], stage_dummies], axis=1)
+    return pd.concat([cox_data[columns], stage_dummies], axis=1)
 
 
-def conventional_fit(frame, time_col, event_col):
+def fit_cox_model(frame, time_column, event_column):
     model = CoxPHFitter()
     model.fit(
         frame,
-        duration_col=time_col,
-        event_col=event_col,
+        duration_col=time_column,
+        event_col=event_column,
         show_progress=False,
     )
     return model
 
 
-def ph_screen(model, frame):
+def test_proportional_hazards(model, frame):
     return proportional_hazard_test(
         model,
         frame,
@@ -89,14 +86,14 @@ def ph_screen(model, frame):
 
 def to_counting_process(
     frame,
-    time_col,
-    event_col,
+    time_column,
+    event_column,
     flagged_terms,
 ):
     base = frame.reset_index(drop=True).copy()
     base.insert(0, "id", np.arange(len(base), dtype=int))
-    durations = base[time_col].astype(int).to_numpy()
-    if not np.allclose(durations, base[time_col].to_numpy()):
+    durations = base[time_column].astype(int).to_numpy()
+    if not np.allclose(durations, base[time_column].to_numpy()):
         raise ValueError("Expected integer SEER survival months")
     if np.any(durations <= 0):
         raise ValueError("Expected strictly positive follow-up")
@@ -105,19 +102,19 @@ def to_counting_process(
     long["stop"] = long.groupby("id").cumcount() + 1
     long["start"] = long["stop"] - 1
     long["event_long"] = (
-        (long[event_col] == 1) & (long["stop"] == long[time_col])
+        (long[event_column] == 1) & (long["stop"] == long[time_column])
     ).astype(int)
-    log_time = np.log(long["stop"].to_numpy(dtype=float) / CENTER_TIME)
+    log_time = np.log(long["stop"].to_numpy(dtype=float) / REFERENCE_MONTH)
     for term in flagged_terms:
         long[f"tv__{term}"] = long[term].to_numpy() * log_time
-    return long.drop(columns=[time_col, event_col])
+    return long.drop(columns=[time_column, event_column])
 
 
-def extended_fit(frame, time_col, event_col, flagged_terms):
+def fit_time_varying_cox_model(frame, time_column, event_column, flagged_terms):
     long = to_counting_process(
         frame,
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         flagged_terms,
     )
     model = CoxTimeVaryingFitter()
@@ -179,14 +176,14 @@ def pretty_term(term):
     return term
 
 
-def fmt_estimate(estimate):
+def format_estimate(estimate):
     return (
         f"{estimate['HR']:.2f} "
         f"({estimate['CI lower']:.2f}-{estimate['CI upper']:.2f})"
     )
 
 
-def fmt_p(p):
+def format_p_value(p):
     return "<0.001" if p < 0.001 else f"{p:.3f}"
 
 
@@ -204,12 +201,8 @@ def time_varying_coefficient_rows(endpoint, model, flagged_terms):
                 "Stratum": "Overall interaction model",
                 "Term": pretty_term(term),
                 "HR at 6 months": float(np.exp(coef)),
-                "95% CI lower at 6 months": float(
-                    np.exp(coef - Z_975 * se)
-                ),
-                "95% CI upper at 6 months": float(
-                    np.exp(coef + Z_975 * se)
-                ),
+                "95% CI lower at 6 months": float(np.exp(coef - Z_975 * se)),
+                "95% CI upper at 6 months": float(np.exp(coef + Z_975 * se)),
                 "p at 6 months": float(row["p"]),
                 "Time interaction coefficient": float(tv_row["coef"]),
                 "Time interaction p": float(tv_row["p"]),
@@ -222,57 +215,55 @@ def time_varying_coefficient_rows(endpoint, model, flagged_terms):
     return rows
 
 
-def fit_endpoint(endpoint, df, time_col, event_col):
-    subset = df[
-        df["era"].isin([3, 4]) & df["race"].isin(RACES)
-    ].copy()
-    reduced = prepare_cox_df(
+def fit_endpoint(endpoint, data, time_column, event_column):
+    subset = data[data["era"].isin([3, 4]) & data["race"].isin(RACES)].copy()
+    reduced = prepare_cox_data(
         subset,
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         include_interaction=False,
     )
-    full = prepare_cox_df(
+    full = prepare_cox_data(
         subset,
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         include_interaction=True,
     )
-    reduced_conventional = conventional_fit(reduced, time_col, event_col)
-    full_conventional = conventional_fit(full, time_col, event_col)
-    reduced_screen = ph_screen(reduced_conventional, reduced)
-    full_screen = ph_screen(full_conventional, full)
+    reduced_conventional = fit_cox_model(reduced, time_column, event_column)
+    full_conventional = fit_cox_model(full, time_column, event_column)
+    reduced_screen = test_proportional_hazards(reduced_conventional, reduced)
+    full_screen = test_proportional_hazards(full_conventional, full)
 
     displayed_terms = {"era4", "era4_x_black"}
     for term in displayed_terms:
-        if term in full_screen.index and float(full_screen.loc[term, "p"]) < ALPHA:
-            raise RuntimeError(
-                f"{endpoint}: displayed term {term} failed PH screening"
-            )
+        if (
+            term in full_screen.index
+            and float(full_screen.loc[term, "p"]) < PH_P_THRESHOLD
+        ):
+            raise RuntimeError(f"{endpoint}: displayed term {term} failed PH screening")
     flagged = sorted(
         {
             term
             for screen in [reduced_screen, full_screen]
             for term, row in screen.iterrows()
-            if float(row["p"]) < ALPHA and term not in displayed_terms
+            if float(row["p"]) < PH_P_THRESHOLD and term not in displayed_terms
         }
     )
-    reduced_model = extended_fit(
+    reduced_model = fit_time_varying_cox_model(
         reduced,
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         flagged,
     )
-    full_model = extended_fit(
+    full_model = fit_time_varying_cox_model(
         full,
-        time_col,
-        event_col,
+        time_column,
+        event_column,
         flagged,
     )
 
     likelihood_ratio = 2.0 * (
-        float(full_model.log_likelihood_)
-        - float(reduced_model.log_likelihood_)
+        float(full_model.log_likelihood_) - float(reduced_model.log_likelihood_)
     )
     lrt_p = 1.0 - erf(sqrt(max(likelihood_ratio, 0.0) / 2.0))
     white = single_estimate(full_model, "era4")
@@ -289,9 +280,9 @@ def fit_endpoint(endpoint, df, time_col, event_col):
 
     def estimate_and_p(estimate, p_value=None):
         p_value = estimate["p"] if p_value is None else p_value
-        p_text = fmt_p(p_value)
+        p_text = format_p_value(p_value)
         p_text = f"p{p_text}" if p_text.startswith("<") else f"p={p_text}"
-        return f"{fmt_estimate(estimate)}; {p_text}"
+        return f"{format_estimate(estimate)}; {p_text}"
 
     endpoint_label = {
         "Overall Survival": "OS",
@@ -299,30 +290,24 @@ def fit_endpoint(endpoint, df, time_col, event_col):
     }[endpoint]
     row = {
         "Endpoint": endpoint_label,
-        "N (events)": f"{len(full):,} ({int(full[event_col].sum()):,})",
+        "N (events)": f"{len(full):,} ({int(full[event_column].sum()):,})",
         "E4 vs E3, NHW aHR (95% CI); p": estimate_and_p(white),
         "E4 vs E3, NHB aHR (95% CI); p": estimate_and_p(black),
         "Interaction ratio (95% CI); LRT p": estimate_and_p(
             interaction,
             lrt_p,
         ),
-        "NHB vs NHW, E3 aHR (95% CI); p": estimate_and_p(
-            black_vs_white_era3
-        ),
-        "NHB vs NHW, E4 aHR (95% CI); p": estimate_and_p(
-            black_vs_white_era4
-        ),
+        "NHB vs NHW, E3 aHR (95% CI); p": estimate_and_p(black_vs_white_era3),
+        "NHB vs NHW, E4 aHR (95% CI); p": estimate_and_p(black_vs_white_era4),
     }
     config_row = {
         "Corresponding result": "Supplementary Table 7",
         "Endpoint": endpoint,
         "Stratum": "Overall interaction model",
         "N": len(full),
-        "Events": int(full[event_col].sum()),
+        "Events": int(full[event_column].sum()),
         "Era-term Schoenfeld p": float(full_screen.loc["era4", "p"]),
-        "Interaction-term Schoenfeld p": float(
-            full_screen.loc["era4_x_black", "p"]
-        ),
+        "Interaction-term Schoenfeld p": float(full_screen.loc["era4_x_black", "p"]),
         "Final model": "Extended Cox",
         "Time function": "log",
         "Time-varying adjustment terms": "; ".join(
@@ -343,9 +328,7 @@ def fit_endpoint(endpoint, df, time_col, event_col):
                     "Endpoint": endpoint,
                     "Model": model_name,
                     "Term": term,
-                    "Schoenfeld test statistic": float(
-                        term_row["test_statistic"]
-                    ),
+                    "Schoenfeld test statistic": float(term_row["test_statistic"]),
                     "Schoenfeld p": float(term_row["p"]),
                 }
             )
@@ -358,17 +341,13 @@ def fit_endpoint(endpoint, df, time_col, event_col):
 
 
 def manuscript_ph_tables(config_rows, coefficient_rows):
-    configurations = pd.read_csv(
-        OUTPUT_DIR / "21_ph_aware_model_configurations.csv"
-    )
+    configurations = pd.read_csv(TABLE_DIR / "21_ph_aware_model_configurations.csv")
     configurations["Interaction-term Schoenfeld p"] = np.nan
     configurations = pd.concat(
         [configurations, pd.DataFrame(config_rows)],
         ignore_index=True,
     )
-    coefficients = pd.read_csv(
-        OUTPUT_DIR / "21_ph_aware_coefficients.csv"
-    )
+    coefficients = pd.read_csv(TABLE_DIR / "21_ph_aware_coefficients.csv")
     coefficients = pd.concat(
         [coefficients, pd.DataFrame(coefficient_rows)],
         ignore_index=True,
@@ -382,18 +361,14 @@ def manuscript_ph_tables(config_rows, coefficient_rows):
         "Supplementary Table 7": 4,
         "Supplementary Table 8": 5,
     }
-    configurations["_order"] = configurations[
-        "Corresponding result"
-    ].map(output_order)
-    configurations = configurations.sort_values(
-        ["_order", "Endpoint", "Stratum"]
-    )
+    configurations["_order"] = configurations["Corresponding result"].map(output_order)
+    configurations = configurations.sort_values(["_order", "Endpoint", "Stratum"])
     configurations["Era-term Schoenfeld p"] = configurations[
         "Era-term Schoenfeld p"
-    ].map(fmt_p)
+    ].map(format_p_value)
     configurations["Interaction-term Schoenfeld p"] = configurations[
         "Interaction-term Schoenfeld p"
-    ].map(lambda value: "" if pd.isna(value) else fmt_p(value))
+    ].map(lambda value: "" if pd.isna(value) else format_p_value(value))
 
     def compact_terms(value):
         if pd.isna(value) or not str(value).strip():
@@ -442,6 +417,7 @@ def manuscript_ph_tables(config_rows, coefficient_rows):
     def compact_analysis(row):
         stratum = str(row["Stratum"])
         stratum = stratum.replace("Overall interaction model", "int")
+        stratum = stratum.replace("Non-Hispanic Asian/PI", "NHA/PI")
         stratum = stratum.replace("Non-Hispanic Black", "NHB")
         stratum = stratum.replace("Non-Hispanic White", "NHW")
         stratum = stratum.replace("Overall", "overall")
@@ -467,12 +443,8 @@ def manuscript_ph_tables(config_rows, coefficient_rows):
         ]
     ]
 
-    coefficients["_order"] = coefficients[
-        "Corresponding result"
-    ].map(output_order)
-    coefficients = coefficients.sort_values(
-        ["_order", "Endpoint", "Stratum", "Term"]
-    )
+    coefficients["_order"] = coefficients["Corresponding result"].map(output_order)
+    coefficients = coefficients.sort_values(["_order", "Endpoint", "Stratum", "Term"])
     coefficients["Adjusted HR at 6 months (95% CI)"] = coefficients.apply(
         lambda row: (
             f"{row['HR at 6 months']:.2f} "
@@ -481,17 +453,15 @@ def manuscript_ph_tables(config_rows, coefficient_rows):
         ),
         axis=1,
     )
-    coefficients["p at 6 months"] = coefficients[
-        "p at 6 months"
-    ].map(fmt_p)
+    coefficients["p at 6 months"] = coefficients["p at 6 months"].map(format_p_value)
     coefficients["HR multiplier per doubling of follow-up"] = coefficients[
         "HR multiplier per doubling of follow-up"
     ].map(lambda value: f"{value:.3f}")
-    coefficients["Time-interaction p"] = coefficients[
-        "Time interaction p"
-    ].map(fmt_p)
+    coefficients["Time-interaction p"] = coefficients["Time interaction p"].map(
+        format_p_value
+    )
 
-    def inline_p(value):
+    def format_inline_p_value(value):
         value = str(value)
         return f"p{value}" if value.startswith("<") else f"p={value}"
 
@@ -503,14 +473,14 @@ def manuscript_ph_tables(config_rows, coefficient_rows):
     coefficients["6-month aHR (95% CI); p"] = coefficients.apply(
         lambda row: (
             f"{row['Adjusted HR at 6 months (95% CI)']}; "
-            f"{inline_p(row['p at 6 months'])}"
+            f"{format_inline_p_value(row['p at 6 months'])}"
         ),
         axis=1,
     )
     coefficients["Per-doubling HR multiplier; p"] = coefficients.apply(
         lambda row: (
             f"{row['HR multiplier per doubling of follow-up']}; "
-            f"{inline_p(row['Time-interaction p'])}"
+            f"{format_inline_p_value(row['Time-interaction p'])}"
         ),
         axis=1,
     )
@@ -542,14 +512,15 @@ def vertical_interaction_table(rows):
 
 
 def main():
-    df_os = overall_survival_data.load_and_prepare_data()
+    TABLE_DIR.mkdir(parents=True, exist_ok=True)
+    os_data = overall_survival_data.load_and_prepare_data()
     df_pcss = prostate_cancer_specific_survival_data.load_and_prepare_data()
     rows = []
     config_rows = []
     coefficient_rows = []
     term_rows = []
-    for endpoint, df, time_col, event_col in [
-        ("Overall Survival", df_os, "os_months", "os_event"),
+    for endpoint, data, time_column, event_column in [
+        ("Overall Survival", os_data, "os_months", "os_event"),
         (
             "Prostate Cancer-Specific Survival",
             df_pcss,
@@ -559,20 +530,20 @@ def main():
     ]:
         row, config_row, new_coefficient_rows, new_term_rows = fit_endpoint(
             endpoint,
-            df,
-            time_col,
-            event_col,
+            data,
+            time_column,
+            event_column,
         )
         rows.append(row)
         config_rows.append(config_row)
         coefficient_rows.extend(new_coefficient_rows)
         term_rows.extend(new_term_rows)
     vertical_interaction_table(rows).to_csv(
-        OUTPUT_DIR / "22_era_race_interaction.csv",
+        TABLE_DIR / "22_era_race_interaction.csv",
         index=False,
     )
     pd.DataFrame(term_rows).to_csv(
-        OUTPUT_DIR / "22_era_race_interaction_ph_terms.csv",
+        TABLE_DIR / "22_era_race_interaction_ph_terms.csv",
         index=False,
     )
     configurations, coefficients = manuscript_ph_tables(
@@ -580,11 +551,11 @@ def main():
         coefficient_rows,
     )
     configurations.to_csv(
-        OUTPUT_DIR / "22_supplementary_table_1_ph_configurations.csv",
+        TABLE_DIR / "22_supplementary_table_1_ph_configurations.csv",
         index=False,
     )
     coefficients.to_csv(
-        OUTPUT_DIR / "22_supplementary_table_2_time_varying_coefficients.csv",
+        TABLE_DIR / "22_supplementary_table_2_time_varying_coefficients.csv",
         index=False,
     )
 

@@ -4,4 +4,4 @@ output/*
 __pycache__/
 tmp
 .DS_Store
-.DS_Store
+.venv/

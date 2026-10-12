@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 from lifelines import CoxPHFitter
@@ -18,14 +17,12 @@ RACE_ORDER = [
     "Non-Hispanic Unknown Race",
 ]
 M_STAGE_ORDER = ["M1a", "M1c", "M1NOS"]
+ANALYSIS_MONTHS = 24
 
 
-CENSOR_TIME = 24
-
-
-def prepare_cox_df(df):
-    cox = (
-        df[
+def prepare_cox_data(data):
+    cox_data = (
+        data[
             [
                 "os_months",
                 "os_event",
@@ -40,27 +37,27 @@ def prepare_cox_df(df):
         .copy()
         .dropna()
     )
-    mask = cox["os_months"] > CENSOR_TIME
-    cox.loc[mask, "os_event"] = 0
-    cox.loc[mask, "os_months"] = CENSOR_TIME
-    cox["era_label"] = cox["era_label"].astype(str)
-    era_dummies = pd.get_dummies(cox["era_label"], prefix="era", drop_first=False)
-    ref_col = f"era_{ERA_REF}"
-    if ref_col in era_dummies.columns:
-        era_dummies = era_dummies.drop(columns=[ref_col])
-    race_dummies = pd.get_dummies(cox["race"], prefix="race", drop_first=False)
-    ref_col = f"race_{RACE_REF}"
-    if ref_col in race_dummies.columns:
-        race_dummies = race_dummies.drop(columns=[ref_col])
+    mask = cox_data["os_months"] > ANALYSIS_MONTHS
+    cox_data.loc[mask, "os_event"] = 0
+    cox_data.loc[mask, "os_months"] = ANALYSIS_MONTHS
+    cox_data["era_label"] = cox_data["era_label"].astype(str)
+    era_dummies = pd.get_dummies(cox_data["era_label"], prefix="era", drop_first=False)
+    reference_column = f"era_{ERA_REF}"
+    if reference_column in era_dummies.columns:
+        era_dummies = era_dummies.drop(columns=[reference_column])
+    race_dummies = pd.get_dummies(cox_data["race"], prefix="race", drop_first=False)
+    reference_column = f"race_{RACE_REF}"
+    if reference_column in race_dummies.columns:
+        race_dummies = race_dummies.drop(columns=[reference_column])
     stage_dummies = pd.get_dummies(
-        cox["m_stage"], prefix="m_stage", drop_first=False
+        cox_data["m_stage"], prefix="m_stage", drop_first=False
     )
-    ref_col = f"m_stage_{M_STAGE_REF}"
-    if ref_col in stage_dummies.columns:
-        stage_dummies = stage_dummies.drop(columns=[ref_col])
+    reference_column = f"m_stage_{M_STAGE_REF}"
+    if reference_column in stage_dummies.columns:
+        stage_dummies = stage_dummies.drop(columns=[reference_column])
     return pd.concat(
         [
-            cox[["os_months", "os_event", "age", "prostatectomy", "radiotherapy"]],
+            cox_data[["os_months", "os_event", "age", "prostatectomy", "radiotherapy"]],
             era_dummies,
             race_dummies,
             stage_dummies,
@@ -69,11 +66,13 @@ def prepare_cox_df(df):
     )
 
 
-def fit_univariate(df_cox, covariate):
-    cph = CoxPHFitter()
-    sub = df_cox[["os_months", "os_event", covariate]].dropna()
-    cph.fit(sub, duration_col="os_months", event_col="os_event", show_progress=False)
-    row = cph.summary.loc[covariate]
+def fit_univariate(cox_data, covariate):
+    cox_model = CoxPHFitter()
+    subset = cox_data[["os_months", "os_event", covariate]].dropna()
+    cox_model.fit(
+        subset, duration_col="os_months", event_col="os_event", show_progress=False
+    )
+    row = cox_model.summary.loc[covariate]
     return {
         "HR": np.exp(row["coef"]),
         "CI_lo": np.exp(row["coef lower 95%"]),
@@ -82,33 +81,35 @@ def fit_univariate(df_cox, covariate):
     }
 
 
-def fit_multivariable(df_cox):
-    cph = CoxPHFitter()
-    cph.fit(df_cox, duration_col="os_months", event_col="os_event", show_progress=False)
-    s = cph.summary.copy()
+def fit_multivariable(cox_data):
+    cox_model = CoxPHFitter()
+    cox_model.fit(
+        cox_data, duration_col="os_months", event_col="os_event", show_progress=False
+    )
+    s = cox_model.summary.copy()
     s["HR"] = np.exp(s["coef"])
     s["CI_lo"] = np.exp(s["coef lower 95%"])
     s["CI_hi"] = np.exp(s["coef upper 95%"])
     return s[["HR", "CI_lo", "CI_hi", "p"]]
 
 
-def fmt_hr(hr, lo, hi):
-    return f"{hr:.4f} ({lo:.4f}-{hi:.4f})"
+def format_hazard_ratio(hr, lower, upper):
+    return f"{hr:.4f} ({lower:.4f}-{upper:.4f})"
 
 
-def fmt_p(p):
+def format_p_value(p):
     if np.isnan(p):
         return ""
     return "< 0.001" if p < 0.001 else f"{p:.4f}"
 
 
-def count_pct(df, col, val):
-    n = (df[col] == val).sum()
-    pct = 100.0 * n / len(df) if len(df) > 0 else 0
+def count_pct(data, col, val):
+    n = (data[col] == val).sum()
+    pct = 100.0 * n / len(data) if len(data) > 0 else 0
     return f"{n:,} ({pct:.2f}%)"
 
 
-def build_table(df, df_cox, mv_results):
+def build_table(data, cox_data, adjusted_results):
     rows = []
 
     def add_ref(label, total_n, total_pct):
@@ -123,21 +124,23 @@ def build_table(df, df_cox, mv_results):
             }
         )
 
-    def add_row(label, n_pct, uv, mv_row):
+    def add_row(label, n_pct, unadjusted, adjusted_row):
         rows.append(
             {
                 "Variable": label,
                 "Sample size (%)": n_pct,
-                "HR (95% CI)": fmt_hr(uv["HR"], uv["CI_lo"], uv["CI_hi"]),
-                "p-value": fmt_p(uv["p"]),
-                "Adjusted HR (95% CI)": fmt_hr(
-                    mv_row["HR"], mv_row["CI_lo"], mv_row["CI_hi"]
+                "HR (95% CI)": format_hazard_ratio(
+                    unadjusted["HR"], unadjusted["CI_lo"], unadjusted["CI_hi"]
                 ),
-                "Adj p-value": fmt_p(mv_row["p"]),
+                "p-value": format_p_value(unadjusted["p"]),
+                "Adjusted HR (95% CI)": format_hazard_ratio(
+                    adjusted_row["HR"], adjusted_row["CI_lo"], adjusted_row["CI_hi"]
+                ),
+                "Adj p-value": format_p_value(adjusted_row["p"]),
             }
         )
 
-    total_n = len(df)
+    total_n = len(data)
 
     rows.append(
         {
@@ -149,31 +152,33 @@ def build_table(df, df_cox, mv_results):
             "Adj p-value": "",
         }
     )
-    e_ref_n = (df["era"] == 3).sum()
+    e_ref_n = (data["era"] == 3).sum()
     add_ref(f"  {ERA_LABELS[3]}", e_ref_n, 100.0 * e_ref_n / total_n)
     for e_label in ERA_ORDER:
         col_key = f"era_{e_label}"
-        if col_key not in df_cox.columns:
+        if col_key not in cox_data.columns:
             continue
         add_row(
             f"  {e_label}",
-            count_pct(df, "era_label", e_label),
-            fit_univariate(df_cox, col_key),
-            mv_results.loc[col_key],
+            count_pct(data, "era_label", e_label),
+            fit_univariate(cox_data, col_key),
+            adjusted_results.loc[col_key],
         )
 
-    uv_age = fit_univariate(df_cox, "age")
-    mv_age = mv_results.loc["age"]
+    unadjusted_age = fit_univariate(cox_data, "age")
+    adjusted_age = adjusted_results.loc["age"]
     rows.append(
         {
             "Variable": "Age (continuous, per year)",
             "Sample size (%)": "",
-            "HR (95% CI)": fmt_hr(uv_age["HR"], uv_age["CI_lo"], uv_age["CI_hi"]),
-            "p-value": fmt_p(uv_age["p"]),
-            "Adjusted HR (95% CI)": fmt_hr(
-                mv_age["HR"], mv_age["CI_lo"], mv_age["CI_hi"]
+            "HR (95% CI)": format_hazard_ratio(
+                unadjusted_age["HR"], unadjusted_age["CI_lo"], unadjusted_age["CI_hi"]
             ),
-            "Adj p-value": fmt_p(mv_age["p"]),
+            "p-value": format_p_value(unadjusted_age["p"]),
+            "Adjusted HR (95% CI)": format_hazard_ratio(
+                adjusted_age["HR"], adjusted_age["CI_lo"], adjusted_age["CI_hi"]
+            ),
+            "Adj p-value": format_p_value(adjusted_age["p"]),
         }
     )
 
@@ -187,17 +192,17 @@ def build_table(df, df_cox, mv_results):
             "Adj p-value": "",
         }
     )
-    r_ref_n = (df["race"] == RACE_REF).sum()
+    r_ref_n = (data["race"] == RACE_REF).sum()
     add_ref(f"  {RACE_REF}", r_ref_n, 100.0 * r_ref_n / total_n)
     for r_label in RACE_ORDER:
         col_key = f"race_{r_label}"
-        if col_key not in df_cox.columns:
+        if col_key not in cox_data.columns:
             continue
         add_row(
             f"  {r_label}",
-            count_pct(df, "race", r_label),
-            fit_univariate(df_cox, col_key),
-            mv_results.loc[col_key],
+            count_pct(data, "race", r_label),
+            fit_univariate(cox_data, col_key),
+            adjusted_results.loc[col_key],
         )
 
     rows.append(
@@ -210,7 +215,7 @@ def build_table(df, df_cox, mv_results):
             "Adj p-value": "",
         }
     )
-    stage_ref_n = (df["m_stage"] == M_STAGE_REF).sum()
+    stage_ref_n = (data["m_stage"] == M_STAGE_REF).sum()
     add_ref(
         f"  {M_STAGE_REF}",
         stage_ref_n,
@@ -218,13 +223,13 @@ def build_table(df, df_cox, mv_results):
     )
     for stage_label in M_STAGE_ORDER:
         col_key = f"m_stage_{stage_label}"
-        if col_key not in df_cox.columns:
+        if col_key not in cox_data.columns:
             continue
         add_row(
             f"  {stage_label}",
-            count_pct(df, "m_stage", stage_label),
-            fit_univariate(df_cox, col_key),
-            mv_results.loc[col_key],
+            count_pct(data, "m_stage", stage_label),
+            fit_univariate(cox_data, col_key),
+            adjusted_results.loc[col_key],
         )
 
     rows.append(
@@ -237,13 +242,13 @@ def build_table(df, df_cox, mv_results):
             "Adj p-value": "",
         }
     )
-    rp_no_n = (df["prostatectomy"] == 0).sum()
+    rp_no_n = (data["prostatectomy"] == 0).sum()
     add_ref("  No", rp_no_n, 100.0 * rp_no_n / total_n)
     add_row(
         "  Yes",
-        count_pct(df, "prostatectomy", 1),
-        fit_univariate(df_cox, "prostatectomy"),
-        mv_results.loc["prostatectomy"],
+        count_pct(data, "prostatectomy", 1),
+        fit_univariate(cox_data, "prostatectomy"),
+        adjusted_results.loc["prostatectomy"],
     )
 
     rows.append(
@@ -256,13 +261,13 @@ def build_table(df, df_cox, mv_results):
             "Adj p-value": "",
         }
     )
-    rt_no_n = (df["radiotherapy"] == 0).sum()
-    add_ref("  No", rt_no_n, 100.0 * rt_no_n / total_n)
+    rt_no_n = (data["radiotherapy"] == 0).sum()
+    add_ref("  No/unknown", rt_no_n, 100.0 * rt_no_n / total_n)
     add_row(
         "  Yes",
-        count_pct(df, "radiotherapy", 1),
-        fit_univariate(df_cox, "radiotherapy"),
-        mv_results.loc["radiotherapy"],
+        count_pct(data, "radiotherapy", 1),
+        fit_univariate(cox_data, "radiotherapy"),
+        adjusted_results.loc["radiotherapy"],
     )
 
     return pd.DataFrame(

@@ -1,37 +1,29 @@
-
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-import seaborn as sns
-
-sns.set_theme(style="whitegrid")
 import pandas as pd
+import seaborn as sns
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import multivariate_logrank_test
 
-from overall_survival_data import (
-    ERA_COLORS,
-    ERA_LABELS,
-    load_and_prepare_data,
-)
+from overall_survival_data import ERA_COLORS, ERA_LABELS, load_and_prepare_data
+
+sns.set_theme(style="whitegrid")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = PROJECT_ROOT / "output" / "figures"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
+FIGURE_DIR = PROJECT_ROOT / "output" / "figures"
 STAGES = ["M1a", "M1b", "M1c"]
 ERAS = [2, 3, 4]
-
 ROW_STRATA = [
     ("Overall", None),
     ("Non-Hispanic White", "Non-Hispanic White"),
     ("Non-Hispanic Black", "Non-Hispanic Black"),
 ]
-
 PANEL_LETTERS = {
     (0, 0): "A",
     (0, 1): "B",
@@ -43,53 +35,58 @@ PANEL_LETTERS = {
     (2, 1): "H",
     (2, 2): "I",
 }
+ANALYSIS_MONTHS = 24
 
-X_LIMIT = 24
 
-
-def format_p_value(p_val):
-    if p_val is None:
+def format_p_value(p_value):
+    if p_value is None:
         return "N/A"
-    return "p < 0.0001" if p_val < 0.0001 else f"p = {p_val:.4f}"
+    return "p < 0.0001" if p_value < 0.0001 else f"p = {p_value:.4f}"
 
 
-def plot_panel(ax, df_sub: pd.DataFrame, panel_title: str, panel_letter: str = None):
+def plot_panel(
+    ax, data_subset: pd.DataFrame, panel_title: str, panel_letter: str = None
+):
     for era in ERAS:
-        sub_era = (
-            df_sub[df_sub["era"] == era].dropna(subset=["os_months", "os_event"]).copy()
+        era_subset = (
+            data_subset[data_subset["era"] == era]
+            .dropna(subset=["os_months", "os_event"])
+            .copy()
         )
-        if len(sub_era) == 0:
+        if len(era_subset) == 0:
             continue
-        mask = sub_era["os_months"] > X_LIMIT
-        sub_era.loc[mask, "os_event"] = 0
-        sub_era.loc[mask, "os_months"] = X_LIMIT
+        mask = era_subset["os_months"] > ANALYSIS_MONTHS
+        era_subset.loc[mask, "os_event"] = 0
+        era_subset.loc[mask, "os_months"] = ANALYSIS_MONTHS
 
-        kmf = KaplanMeierFitter()
-        kmf.fit(
-            sub_era["os_months"],
-            event_observed=sub_era["os_event"],
+        km_model = KaplanMeierFitter()
+        km_model.fit(
+            era_subset["os_months"],
+            event_observed=era_subset["os_event"],
             label=ERA_LABELS[era],
         )
-        kmf.plot_survival_function(
+        km_model.plot_survival_function(
             ax=ax,
             ci_show=False,
             color=ERA_COLORS[era],
             linewidth=2,
         )
 
-    sub_all = (
-        df_sub[df_sub["era"].isin(ERAS)].dropna(subset=["os_months", "os_event"]).copy()
+    all_patients = (
+        data_subset[data_subset["era"].isin(ERAS)]
+        .dropna(subset=["os_months", "os_event"])
+        .copy()
     )
-    mask = sub_all["os_months"] > X_LIMIT
-    sub_all.loc[mask, "os_event"] = 0
-    sub_all.loc[mask, "os_months"] = X_LIMIT
-    if len(sub_all) > 0 and sub_all["era"].nunique() > 1:
-        lr = multivariate_logrank_test(
-            sub_all["os_months"],
-            sub_all["era"],
-            sub_all["os_event"],
+    mask = all_patients["os_months"] > ANALYSIS_MONTHS
+    all_patients.loc[mask, "os_event"] = 0
+    all_patients.loc[mask, "os_months"] = ANALYSIS_MONTHS
+    if len(all_patients) > 0 and all_patients["era"].nunique() > 1:
+        logrank_result = multivariate_logrank_test(
+            all_patients["os_months"],
+            all_patients["era"],
+            all_patients["os_event"],
         )
-        p_text = format_p_value(lr.p_value)
+        p_text = format_p_value(logrank_result.p_value)
     else:
         p_text = "N/A"
 
@@ -106,7 +103,7 @@ def plot_panel(ax, df_sub: pd.DataFrame, panel_title: str, panel_letter: str = N
         ),
     )
 
-    ax.set_xlim(0, X_LIMIT)
+    ax.set_xlim(0, ANALYSIS_MONTHS)
     ax.set_ylim(0, 1.05)
     if panel_letter:
         ax.text(
@@ -130,22 +127,23 @@ def plot_panel(ax, df_sub: pd.DataFrame, panel_title: str, panel_letter: str = N
 
 
 def main():
-    df = load_and_prepare_data()
-    df = df[df["era"].isin(ERAS) & df["m_stage"].isin(STAGES)].copy()
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    data = load_and_prepare_data()
+    data = data[data["era"].isin(ERAS) & data["m_stage"].isin(STAGES)].copy()
     fig, axes = plt.subplots(3, 3, figsize=(18, 14), sharex=False, sharey=False)
     for row_idx, (stratum_label, race_value) in enumerate(ROW_STRATA):
         for col_idx, stage in enumerate(STAGES):
             ax = axes[row_idx, col_idx]
-            sub = df[df["m_stage"] == stage]
+            subset = data[data["m_stage"] == stage]
             if race_value is not None:
-                sub = sub[sub["race"] == race_value]
-            n_val = len(sub)
+                subset = subset[subset["race"] == race_value]
+            n_val = len(subset)
             letter = PANEL_LETTERS[(row_idx, col_idx)]
             title = f"{stage}, {stratum_label} (n = {n_val:,})"
-            plot_panel(ax, sub, title, panel_letter=letter)
+            plot_panel(ax, subset, title, panel_letter=letter)
     plt.tight_layout()
-    out_path = OUTPUT_DIR / "07_os_km_stage_race_era.png"
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    output_path = FIGURE_DIR / "07_os_km_stage_race_era.png"
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
